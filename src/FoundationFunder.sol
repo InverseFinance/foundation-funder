@@ -40,16 +40,9 @@ contract FoundationFunder {
                               STRUCTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev Tracks a streaming token bucket for quarterly gov limits
-    struct TokenBucket {
-        uint256 quarterlyLimit;
-        uint256 available;
-        uint256 lastUpdated;
-    }
-
-    /// @dev Configuration and state for a delegate's per-token streaming limit
-    struct DelegateConfig {
-        uint256 limitAmount;
+    /// @dev Unified rate-limited bucket used for both quarterly token limits and delegate configs
+    struct Bucket {
+        uint256 limit;
         uint256 interval;
         uint256 available;
         uint256 lastUpdated;
@@ -62,11 +55,11 @@ contract FoundationFunder {
     address public gov;
     address public beneficiary;
 
-    /// @dev token address => TokenBucket (quarterly streaming limit set by gov)
-    mapping(address => TokenBucket) public tokenBuckets;
+    /// @dev token address => Bucket (quarterly streaming limit set by gov)
+    mapping(address => Bucket) public tokenBuckets;
 
-    /// @dev delegate address => token address => DelegateConfig
-    mapping(address => mapping(address => DelegateConfig)) public delegateConfigs;
+    /// @dev delegate address => token address => Bucket
+    mapping(address => mapping(address => Bucket)) public delegateConfigs;
 
     /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
@@ -107,14 +100,15 @@ contract FoundationFunder {
     function setQuarterlyLimit(address _token, uint256 _quarterlyLimit) external {
         if (msg.sender != gov) revert Unauthorized();
 
-        TokenBucket storage bucket = tokenBuckets[_token];
+        Bucket storage bucket = tokenBuckets[_token];
 
         // Accrue with old params before updating
-        if (bucket.quarterlyLimit > 0) {
+        if (bucket.limit > 0) {
             bucket.available = getTokenAvailable(_token);
         }
 
-        bucket.quarterlyLimit = _quarterlyLimit;
+        bucket.limit = _quarterlyLimit;
+        bucket.interval = QUARTER_DURATION;
         if (bucket.available > _quarterlyLimit) {
             bucket.available = _quarterlyLimit;
         }
@@ -138,21 +132,21 @@ contract FoundationFunder {
         if (_delegate == address(0)) revert ZeroAddress();
         if (_limitAmount > 0 && _interval == 0) revert ZeroInterval();
 
-        DelegateConfig storage config = delegateConfigs[_delegate][_token];
+        Bucket storage bucket = delegateConfigs[_delegate][_token];
 
         // Accrue with old params before updating
-        if (config.limitAmount > 0) {
-            config.available = getDelegateAvailable(_delegate, _token);
+        if (bucket.limit > 0) {
+            bucket.available = getDelegateAvailable(_delegate, _token);
         }
 
-        config.limitAmount = _limitAmount;
-        config.interval = _interval;
+        bucket.limit = _limitAmount;
+        bucket.interval = _interval;
         if (_limitAmount == 0) {
-            config.available = 0;
-        } else if (config.available > _limitAmount) {
-            config.available = _limitAmount;
+            bucket.available = 0;
+        } else if (bucket.available > _limitAmount) {
+            bucket.available = _limitAmount;
         }
-        config.lastUpdated = block.timestamp;
+        bucket.lastUpdated = block.timestamp;
 
         emit DelegateSet(_delegate, _token, _limitAmount, _interval);
     }
@@ -173,16 +167,17 @@ contract FoundationFunder {
         if (_to == address(0)) revert ZeroAddress();
 
         bool isBeneficiary = msg.sender == beneficiary;
-        bool isDelegate = delegateConfigs[msg.sender][_token].limitAmount > 0;
+        bool isDelegate = delegateConfigs[msg.sender][_token].limit > 0;
 
         if (!isBeneficiary && !isDelegate) revert Unauthorized();
 
         // Update and check quarterly bucket (required for both beneficiary and delegate)
-        _updateAndConsumeTokenBucket(_token, _amount);
+        if (tokenBuckets[_token].limit == 0) revert TokenNotAllowed();
+        _updateAndConsume(tokenBuckets[_token], _amount);
 
         // If delegate, also check delegate bucket
         if (isDelegate) {
-            _updateAndConsumeDelegateBucket(msg.sender, _token, _amount);
+            _updateAndConsume(delegateConfigs[msg.sender][_token], _amount);
         }
 
         SafeTransferLib.safeTransferFrom(_token, gov, _to, _amount);
@@ -198,16 +193,7 @@ contract FoundationFunder {
     /// @param _token The token address
     /// @return The currently available amount
     function getTokenAvailable(address _token) public view returns (uint256) {
-        TokenBucket storage bucket = tokenBuckets[_token];
-        if (bucket.quarterlyLimit == 0) return 0;
-
-        uint256 elapsed = block.timestamp - bucket.lastUpdated;
-        uint256 accrued = bucket.quarterlyLimit * elapsed / QUARTER_DURATION;
-        uint256 currentAvailable = bucket.available + accrued;
-        if (currentAvailable > bucket.quarterlyLimit) {
-            currentAvailable = bucket.quarterlyLimit;
-        }
-        return currentAvailable;
+        return _getAvailable(tokenBuckets[_token]);
     }
 
     /// @notice Returns the current available amount for a delegate's token bucket
@@ -219,48 +205,28 @@ contract FoundationFunder {
         view
         returns (uint256)
     {
-        DelegateConfig storage config = delegateConfigs[_delegate][_token];
-        if (config.limitAmount == 0) return 0;
-
-        uint256 elapsed = block.timestamp - config.lastUpdated;
-        uint256 accrued = config.limitAmount * elapsed / config.interval;
-        uint256 currentAvailable = config.available + accrued;
-        if (currentAvailable > config.limitAmount) {
-            currentAvailable = config.limitAmount;
-        }
-        return currentAvailable;
+        return _getAvailable(delegateConfigs[_delegate][_token]);
     }
 
     /*//////////////////////////////////////////////////////////////
                         INTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev Accrues the quarterly token bucket and consumes the requested amount
-    function _updateAndConsumeTokenBucket(address _token, uint256 _amount) internal {
-        TokenBucket storage bucket = tokenBuckets[_token];
-        if (bucket.quarterlyLimit == 0) revert TokenNotAllowed();
-
-        uint256 currentAvailable = getTokenAvailable(_token);
-        if (_amount > currentAvailable) {
-            revert ExceedsAvailable(_amount, currentAvailable);
-        }
-        bucket.available = currentAvailable - _amount;
-        bucket.lastUpdated = block.timestamp;
+    /// @dev Returns the current available amount for a bucket, including accrued amount
+    function _getAvailable(Bucket storage bucket) internal view returns (uint256) {
+        if (bucket.limit == 0) return 0;
+        uint256 elapsed = block.timestamp - bucket.lastUpdated;
+        uint256 accrued = bucket.limit * elapsed / bucket.interval;
+        uint256 currentAvailable = bucket.available + accrued;
+        if (currentAvailable > bucket.limit) currentAvailable = bucket.limit;
+        return currentAvailable;
     }
 
-    /// @dev Accrues the delegate's token bucket and consumes the requested amount
-    function _updateAndConsumeDelegateBucket(
-        address _delegate,
-        address _token,
-        uint256 _amount
-    ) internal {
-        DelegateConfig storage config = delegateConfigs[_delegate][_token];
-
-        uint256 currentAvailable = getDelegateAvailable(_delegate, _token);
-        if (_amount > currentAvailable) {
-            revert ExceedsAvailable(_amount, currentAvailable);
-        }
-        config.available = currentAvailable - _amount;
-        config.lastUpdated = block.timestamp;
+    /// @dev Accrues a bucket and consumes the requested amount
+    function _updateAndConsume(Bucket storage bucket, uint256 _amount) internal {
+        uint256 currentAvailable = _getAvailable(bucket);
+        if (_amount > currentAvailable) revert ExceedsAvailable(_amount, currentAvailable);
+        bucket.available = currentAvailable - _amount;
+        bucket.lastUpdated = block.timestamp;
     }
 }

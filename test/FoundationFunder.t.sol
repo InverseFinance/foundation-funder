@@ -176,9 +176,10 @@ contract FoundationFunderTest is Test {
         vm.prank(govAddr);
         funder.setQuarterlyLimit(address(token), 1000e18);
 
-        (uint256 limit, uint256 available, uint256 lastUpdated) =
+        (uint256 limit, uint256 interval, uint256 available, uint256 lastUpdated) =
             funder.tokenBuckets(address(token));
         assertEq(limit, 1000e18);
+        assertEq(interval, 90 days);
         assertEq(available, 0);
         assertEq(lastUpdated, block.timestamp);
     }
@@ -207,7 +208,7 @@ contract FoundationFunderTest is Test {
         vm.prank(govAddr);
         funder.setQuarterlyLimit(address(token), 2000e18);
 
-        (uint256 limit, uint256 available,) = funder.tokenBuckets(address(token));
+        (uint256 limit,, uint256 available,) = funder.tokenBuckets(address(token));
         assertEq(limit, 2000e18);
         // Should have accrued ~500e18 with old limit (1000 * 0.5)
         assertEq(available, 500e18);
@@ -224,7 +225,7 @@ contract FoundationFunderTest is Test {
         vm.prank(govAddr);
         funder.setQuarterlyLimit(address(token), 500e18);
 
-        (uint256 limit, uint256 available,) = funder.tokenBuckets(address(token));
+        (uint256 limit,, uint256 available,) = funder.tokenBuckets(address(token));
         assertEq(limit, 500e18);
         // Available should be capped at new limit
         assertEq(available, 500e18);
@@ -239,7 +240,7 @@ contract FoundationFunderTest is Test {
         vm.prank(govAddr);
         funder.setQuarterlyLimit(address(token), 0);
 
-        (uint256 limit, uint256 available,) = funder.tokenBuckets(address(token));
+        (uint256 limit,, uint256 available,) = funder.tokenBuckets(address(token));
         assertEq(limit, 0);
         assertEq(available, 0);
     }
@@ -252,9 +253,9 @@ contract FoundationFunderTest is Test {
         vm.prank(beneficiaryAddr);
         funder.setDelegate(delegate1, address(token), 100e18, 1 days);
 
-        (uint256 limitAmount, uint256 interval, uint256 available, uint256 lastUpdated) =
+        (uint256 limit, uint256 interval, uint256 available, uint256 lastUpdated) =
             funder.delegateConfigs(delegate1, address(token));
-        assertEq(limitAmount, 100e18);
+        assertEq(limit, 100e18);
         assertEq(interval, 1 days);
         assertEq(available, 0);
         assertEq(lastUpdated, block.timestamp);
@@ -290,8 +291,8 @@ contract FoundationFunderTest is Test {
         vm.prank(beneficiaryAddr);
         funder.setDelegate(delegate1, address(token), 0, 0);
 
-        (uint256 limitAmount,,,) = funder.delegateConfigs(delegate1, address(token));
-        assertEq(limitAmount, 0);
+        (uint256 limit,,,) = funder.delegateConfigs(delegate1, address(token));
+        assertEq(limit, 0);
     }
 
     function test_setDelegate_updateConfig() public {
@@ -305,9 +306,9 @@ contract FoundationFunderTest is Test {
         vm.prank(beneficiaryAddr);
         funder.setDelegate(delegate1, address(token), 200e18, 2 days);
 
-        (uint256 limitAmount, uint256 interval, uint256 available,) =
+        (uint256 limit, uint256 interval, uint256 available,) =
             funder.delegateConfigs(delegate1, address(token));
-        assertEq(limitAmount, 200e18);
+        assertEq(limit, 200e18);
         assertEq(interval, 2 days);
         // Accrued ~50e18 with old config (100e18 * 0.5)
         assertEq(available, 50e18);
@@ -321,15 +322,15 @@ contract FoundationFunderTest is Test {
 
         // Disable
         funder.setDelegate(delegate1, address(token), 0, 0);
-        (uint256 limitAmount,, uint256 available,) =
+        (uint256 limit,, uint256 available,) =
             funder.delegateConfigs(delegate1, address(token));
-        assertEq(limitAmount, 0);
+        assertEq(limit, 0);
         assertEq(available, 0);
 
         // Re-enable
         funder.setDelegate(delegate1, address(token), 50e18, 12 hours);
-        (limitAmount,, available,) = funder.delegateConfigs(delegate1, address(token));
-        assertEq(limitAmount, 50e18);
+        (limit,, available,) = funder.delegateConfigs(delegate1, address(token));
+        assertEq(limit, 50e18);
         assertEq(available, 0);
 
         vm.stopPrank();
@@ -453,7 +454,7 @@ contract FoundationFunderTest is Test {
         funder.pull(address(token), 200e18, recipient, "first pull");
 
         // Available should be 300e18 (500 - 200)
-        (,uint256 available,) = funder.tokenBuckets(address(token));
+        (,,uint256 available,) = funder.tokenBuckets(address(token));
         assertEq(available, 300e18);
 
         // Wait another quarter, should accrue back to 1000e18 cap
@@ -583,7 +584,7 @@ contract FoundationFunderTest is Test {
         funder.pull(address(token), 80e18, recipient, "double gated");
 
         // Check both buckets were decremented
-        (,uint256 tokenAvailable,) = funder.tokenBuckets(address(token));
+        (,,uint256 tokenAvailable,) = funder.tokenBuckets(address(token));
         (,,uint256 delegateAvailable,) = funder.delegateConfigs(delegate1, address(token));
 
         // Quarterly: accrued 9000/90 = 100e18 in 1 day, minus 80
